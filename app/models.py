@@ -86,6 +86,7 @@ class RecoveryAction(str, enum.Enum):
 
     NO_ACTION = "NO_ACTION"
     SEND_PAYMENT_LINK = "SEND_PAYMENT_LINK"  # Future phase
+    SEND_PAYMENT_LINK_WITH_DISCOUNT = "SEND_PAYMENT_LINK_WITH_DISCOUNT"  # Future phase
 
 
 # ── ORM Models ────────────────────────────────────────────────────────────────
