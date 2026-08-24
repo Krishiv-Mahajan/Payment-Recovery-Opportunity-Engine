@@ -52,8 +52,8 @@ def main() -> None:
     df_0 = pd.DataFrame(rows_0)[FEATURE_COLS]
     df_1 = pd.DataFrame(rows_1)[FEATURE_COLS]
 
-    p0_arr = model._pipeline.predict_proba(df_0)[:, 1]
-    p1_arr = model._pipeline.predict_proba(df_1)[:, 1]
+    p0_arr = model.predict_batch_probabilities(df_0)
+    p1_arr = model.predict_batch_probabilities(df_1)
     print(f"  Done. P0 mean={p0_arr.mean():.3f}, P1 mean={p1_arr.mean():.3f}\n")
 
     # ── 3. Build per-transaction arrays ───────────────────────────────────

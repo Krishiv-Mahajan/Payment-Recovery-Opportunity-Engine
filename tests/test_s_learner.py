@@ -13,13 +13,15 @@ Verifies:
 """
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from app.ml.features import PaymentFeatures
 from app.ml.models.s_learner import SLearner
 from app.ml.policy import EconomicPolicyPredictor
 from app.ml.predictor import PolicyPrediction
-from app.ml.training import build_training_dataframe
+from app.ml.training import FEATURE_COLS, build_training_dataframe
 from app.models import RecoveryAction, DecisionStatus
 from app.simulator.runner import generate_logging_dataset
 from app.simulator.schemas import INTERVENTION_COSTS_PAISE
@@ -133,6 +135,29 @@ class TestSLearner:
         original_failure = features.prior_failure_count
         model.predict_probabilities(features)
         assert features.prior_failure_count == original_failure  # still None
+
+    def test_predict_batch_probabilities(self):
+        """Verifies predict_batch_probabilities exists, output length matches df length, values in [0, 1], and matches direct pipeline."""
+        model = _train_small_model(n=500, seed=42)
+        records = generate_logging_dataset(50, seed=123, policy_weights=TRAIN_WEIGHTS)
+        df = build_training_dataframe(records)[FEATURE_COLS]
+
+        probs = model.predict_batch_probabilities(df)
+
+        assert hasattr(model, "predict_batch_probabilities")
+        assert isinstance(probs, np.ndarray)
+        assert len(probs) == len(df)
+        assert np.all((probs >= 0.0) & (probs <= 1.0))
+
+        # Results must match direct pipeline predictions
+        direct_probs = model._pipeline.predict_proba(df)[:, 1]
+        np.testing.assert_array_equal(probs, direct_probs)
+
+    def test_predict_batch_probabilities_unfitted_raises(self):
+        model = SLearner()
+        df = pd.DataFrame()
+        with pytest.raises(RuntimeError, match="fitted"):
+            model.predict_batch_probabilities(df)
 
 
 class TestEconomicPolicyPredictor:

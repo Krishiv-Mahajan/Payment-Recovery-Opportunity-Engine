@@ -145,6 +145,24 @@ class SLearner:
         p1 = float(probs[1])
         return p0, p1
 
+    def predict_batch_probabilities(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Predict P(recovery = 1) for a batch of feature rows represented in a DataFrame.
+
+        Args:
+            df: DataFrame containing preprocessed FEATURE_COLS.
+
+        Returns:
+            1D numpy array of probabilities in [0, 1].
+
+        Raises:
+            RuntimeError: If called before fit().
+        """
+        if not self.is_fitted or self._pipeline is None:
+            raise RuntimeError("SLearner must be fitted before predict_batch_probabilities.")
+
+        return self._pipeline.predict_proba(df)[:, 1]
+
     def predict_uplift_variance_diagnostic(self, df: pd.DataFrame) -> dict:
         """
         Compute uplift statistics over a feature DataFrame (without outcome label).
@@ -166,8 +184,8 @@ class SLearner:
         df_1 = df[FEATURE_COLS].copy()
         df_1["action"] = ACTION_ENCODING[RecoveryAction.SEND_PAYMENT_LINK]
 
-        p0_arr = self._pipeline.predict_proba(df_0)[:, 1]
-        p1_arr = self._pipeline.predict_proba(df_1)[:, 1]
+        p0_arr = self.predict_batch_probabilities(df_0)
+        p1_arr = self.predict_batch_probabilities(df_1)
         uplift_arr = p1_arr - p0_arr
 
         near_zero_threshold = 0.02
