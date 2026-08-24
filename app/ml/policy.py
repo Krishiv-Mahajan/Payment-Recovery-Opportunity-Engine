@@ -84,6 +84,10 @@ class EconomicPolicyPredictor:
             selected_action=selected_action,
             model_version=SLEARNER_MODEL_VERSION,
             reasoning=reasoning,
+            predicted_p0=p0,
+            predicted_p1=p1,
+            predicted_uplift=predicted_uplift,
+            expected_incremental_net_paise=int(expected_incremental_net_paise),
         )
 
     @property

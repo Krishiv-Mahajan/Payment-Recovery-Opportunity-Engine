@@ -317,10 +317,42 @@ def create_recovery_decision(
         decision_status=prediction.decision_status,
         selected_action=prediction.selected_action,
         model_version=prediction.model_version,
+        predicted_p0=prediction.predicted_p0,
+        predicted_p1=prediction.predicted_p1,
+        predicted_uplift=prediction.predicted_uplift,
+        expected_incremental_net_paise=prediction.expected_incremental_net_paise,
     )
     db.add(decision)
     db.flush()
     return decision
+
+
+def update_recovery_decision_execution(
+    db: Session,
+    decision: RecoveryDecision,
+    execution_reference_id: str,
+) -> None:
+    """
+    Update a decision after successful execution dispatch.
+    """
+    decision.decision_status = DecisionStatus.EXECUTED
+    decision.execution_reference_id = execution_reference_id
+    decision.executed_at = datetime.now(timezone.utc)
+    db.add(decision)
+    db.flush()
+
+
+def update_recovery_decision_outcome(
+    db: Session,
+    decision: RecoveryDecision,
+) -> None:
+    """
+    Update a decision after observing a downstream outcome (e.g., payment_link.paid).
+    """
+    decision.decision_status = DecisionStatus.OUTCOME_OBSERVED
+    decision.outcome_observed_at = datetime.now(timezone.utc)
+    db.add(decision)
+    db.flush()
 
 
 def append_audit_log(

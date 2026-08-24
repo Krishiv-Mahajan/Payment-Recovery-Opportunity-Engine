@@ -25,6 +25,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -279,6 +280,17 @@ class RecoveryDecision(Base):
     model_version: Mapped[str] = mapped_column(
         String(64), nullable=False, default="placeholder-v0"
     )
+
+    # Predictive Metrics
+    predicted_p0: Mapped[float | None] = mapped_column(Float, nullable=True)
+    predicted_p1: Mapped[float | None] = mapped_column(Float, nullable=True)
+    predicted_uplift: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_incremental_net_paise: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Execution and Closed-Loop Tracking
+    execution_reference_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    outcome_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

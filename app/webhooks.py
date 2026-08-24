@@ -175,7 +175,7 @@ async def receive_razorpay_webhook(
 
     # ── Step 6: Process the event ──────────────────────────────────────
     try:
-        process_webhook_event(db, webhook_event, parsed_payload)
+        process_webhook_event(db, webhook_event, parsed_payload, request.app.state)
         db.commit()
     except Exception as exc:
         logger.exception(

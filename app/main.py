@@ -20,11 +20,16 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
+import joblib
 from fastapi import FastAPI, HTTPException, Depends, status
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db, init_db
+from app.executor import MockPaymentLinkProvider
+from app.guardrails import GuardrailsEngine
+from app.ml.policy import EconomicPolicyPredictor
+from app.ml.predictor import PlaceholderPredictor
 from app.models import WebhookEvent
 from app.schemas import EventDetailResponse, HealthResponse
 from app.webhooks import router as webhook_router
@@ -52,6 +57,20 @@ def create_app() -> FastAPI:
         logger.info("Config: %r", settings)
         init_db()
         logger.info("Database initialized successfully")
+        
+        # Load Phase 3 model and inject dependencies
+        try:
+            s_learner = joblib.load("artifacts/model_v1.joblib")
+            predictor = EconomicPolicyPredictor(s_learner)
+            logger.info("Loaded EconomicPolicyPredictor with Phase 3 model.")
+        except Exception as e:
+            logger.error("Failed to load Phase 3 model (%s). Falling back to PlaceholderPredictor.", e)
+            predictor = PlaceholderPredictor()
+
+        app.state.predictor = predictor
+        app.state.guardrails = GuardrailsEngine()
+        app.state.executor = MockPaymentLinkProvider()
+
         yield
         logger.info("Shutting down Recovery Opportunity Engine")
 

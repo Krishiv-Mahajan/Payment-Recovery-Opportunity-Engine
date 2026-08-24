@@ -162,9 +162,9 @@ class TestPaymentFailedProcessing:
                 .first()
             )
             assert decision is not None, "RecoveryDecision must be created for payment.failed"
-            assert decision.decision_status == DecisionStatus.PENDING_POLICY
-            assert decision.selected_action == RecoveryAction.NO_ACTION
-            assert decision.model_version == "placeholder-v0"
+            assert decision.decision_status in [DecisionStatus.DECIDED, DecisionStatus.EXECUTED]
+            assert decision.selected_action in [RecoveryAction.NO_ACTION, RecoveryAction.SEND_PAYMENT_LINK]
+            assert decision.model_version != "placeholder-v0"
 
     def test_payment_failed_creates_audit_logs(self, client, db_engine):
         """payment.failed processing must produce audit log entries."""

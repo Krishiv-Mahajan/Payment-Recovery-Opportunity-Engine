@@ -95,6 +95,26 @@ class RazorpayOrderEntity(BaseModel):
     status: str
 
 
+# ── Razorpay Payment Link Entity ──────────────────────────────────────────────
+
+
+class RazorpayPaymentLinkEntity(BaseModel):
+    """
+    Normalized representation of a Razorpay payment link entity.
+
+    Maps to the payload.payment_link.entity structure in payment_link.paid webhook events.
+    """
+
+    model_config = {"extra": "ignore"}
+
+    id: str
+    entity: str = "payment_link"
+    amount: int | None = None
+    currency: str | None = None
+    status: str
+    notes: dict[str, str] = Field(default_factory=dict)
+
+
 # ── Webhook Payload Container ─────────────────────────────────────────────────
 
 
@@ -163,6 +183,17 @@ class RazorpayWebhookPayload(BaseModel):
         if not entity_data:
             return None
         return RazorpayOrderEntity.model_validate(entity_data)
+
+    def extract_payment_link_entity(self) -> RazorpayPaymentLinkEntity | None:
+        """
+        Extract and validate the payment link entity from the nested payload.
+        Returns None if the payload does not contain a payment link entity.
+        """
+        plink_data = self.payload.get("payment_link", {})
+        entity_data = plink_data.get("entity")
+        if not entity_data:
+            return None
+        return RazorpayPaymentLinkEntity.model_validate(entity_data)
 
 
 # ── Internal API Response Schemas ─────────────────────────────────────────────

@@ -41,26 +41,25 @@ from sqlalchemy.orm import Session
 from app.crud import (
     append_audit_log,
     create_recovery_decision,
+    update_recovery_decision_execution,
+    update_recovery_decision_outcome,
     update_webhook_status,
     upsert_payment_record_from_captured,
     upsert_payment_record_from_failed,
     upsert_payment_record_from_order_paid,
 )
 from app.ml.features import extract_features
-from app.ml.predictor import PlaceholderPredictor
-from app.models import WebhookEvent, WebhookProcessingStatus
+from app.models import RecoveryAction, RecoveryDecision, WebhookEvent, WebhookProcessingStatus
 from app.schemas import RazorpayWebhookPayload
 
 logger = logging.getLogger(__name__)
-
-# Module-level predictor instance — stateless in Phase 1
-_predictor = PlaceholderPredictor()
 
 
 def process_webhook_event(
     db: Session,
     webhook_event: WebhookEvent,
     parsed_payload: RazorpayWebhookPayload,
+    app_state: Any,
 ) -> None:
     """
     Process a validated, non-duplicate webhook event end-to-end.
@@ -87,11 +86,13 @@ def process_webhook_event(
         db.flush()
 
         if event_type == "payment.failed":
-            _handle_payment_failed(db, webhook_event, parsed_payload)
+            _handle_payment_failed(db, webhook_event, parsed_payload, app_state)
         elif event_type == "payment.captured":
             _handle_payment_captured(db, webhook_event, parsed_payload)
         elif event_type == "order.paid":
             _handle_order_paid(db, webhook_event, parsed_payload)
+        elif event_type == "payment_link.paid":
+            _handle_payment_link_paid(db, webhook_event, parsed_payload)
         else:
             _handle_unknown_event(db, webhook_event, event_type)
 
@@ -141,6 +142,7 @@ def _handle_payment_failed(
     db: Session,
     webhook_event: WebhookEvent,
     payload: RazorpayWebhookPayload,
+    app_state: Any,
 ) -> None:
     """
     Handle a payment.failed event.
@@ -203,13 +205,16 @@ def _handle_payment_failed(
         metadata=features.to_dict(),
     )
 
-    # Placeholder policy — always returns PENDING_POLICY in Phase 1
-    prediction = _predictor.predict(features)
+    # 1. Economic Prediction
+    prediction = app_state.predictor.predict(features)
+    
+    # 2. Guardrails (Operational Safety)
+    safe_prediction = app_state.guardrails.evaluate(db, payment_record, prediction)
 
     recovery_decision = create_recovery_decision(
         db,
         payment_record_id=payment_record.id,
-        prediction=prediction,
+        prediction=safe_prediction,
     )
 
     append_audit_log(
@@ -219,18 +224,58 @@ def _handle_payment_failed(
         payment_record_id=payment_record.id,
         reason=prediction.reasoning,
         metadata={
-            "decision_status": prediction.decision_status,
-            "selected_action": prediction.selected_action,
-            "model_version": prediction.model_version,
+            "decision_status": safe_prediction.decision_status,
+            "selected_action": safe_prediction.selected_action,
+            "model_version": safe_prediction.model_version,
             "recovery_decision_id": recovery_decision.id,
         },
     )
 
+    # 3. Action Execution (Synchronous Outbox Simulation)
+    if safe_prediction.selected_action != RecoveryAction.NO_ACTION:
+        # Step A: Persist execution intent first to avoid dual-write vulnerability.
+        # This commits the WebhookEvent, PaymentRecord, and RecoveryDecision(DECIDED).
+        db.commit()
+
+        try:
+            # Step B: Execute Mock Provider
+            idempotency_key = f"exec_rd_{recovery_decision.id}"
+            execution_reference_id = app_state.executor.create_payment_link(
+                recovery_decision, idempotency_key
+            )
+            
+            # Step C: Update Execution Result
+            update_recovery_decision_execution(db, recovery_decision, execution_reference_id)
+            
+            append_audit_log(
+                db,
+                event_type="ACTION_EXECUTED",
+                action="CREATE_PAYMENT_LINK",
+                payment_record_id=payment_record.id,
+                reason=f"Successfully created payment link: {execution_reference_id}",
+                metadata={"execution_reference_id": execution_reference_id},
+            )
+            # The outer webhooks.py loop will commit this final state update.
+        except Exception as exc:
+            logger.error("Action execution failed: %s", exc)
+            append_audit_log(
+                db,
+                event_type="ACTION_EXECUTION_FAILED",
+                action="CREATE_PAYMENT_LINK_FAILED",
+                payment_record_id=payment_record.id,
+                reason=f"Failed to create payment link: {exc}",
+                metadata={"error": str(exc)},
+            )
+            db.commit() # Ensure failure log is persisted
+            # In a full outbox pattern, an async worker would retry DECIDED records.
+            # We swallow the error here so the webhook succeeds and Razorpay doesn't retry,
+            # as our guardrails would incorrectly block a direct webhook retry.
+
     logger.info(
         "payment.failed processed: payment_id=%s decision=%s action=%s",
         payment_entity.id,
-        prediction.decision_status,
-        prediction.selected_action,
+        safe_prediction.decision_status,
+        safe_prediction.selected_action,
     )
 
 
@@ -357,7 +402,71 @@ def _handle_unknown_event(
         db,
         event_type="UNSUPPORTED_EVENT",
         action="SKIP_UNSUPPORTED",
-        reason=f"Event type '{event_type}' is not handled in Phase 1",
+        reason=f"Event type '{event_type}' is not handled in Phase 4",
         metadata={"webhook_event_id": webhook_event.id, "rzp_event_type": event_type},
     )
     logger.info("Unsupported event type received and acknowledged: %s", event_type)
+
+
+def _handle_payment_link_paid(
+    db: Session,
+    webhook_event: WebhookEvent,
+    payload: RazorpayWebhookPayload,
+) -> None:
+    """
+    Handle a payment_link.paid event.
+    
+    Extracts the execution_reference_id and closes the loop by setting OUTCOME_OBSERVED.
+    """
+    plink_entity = payload.extract_payment_link_entity()
+    if not plink_entity:
+        append_audit_log(
+            db,
+            event_type="PAYMENT_LINK_PAID",
+            action="SKIP_MISSING_ENTITY",
+            reason="payment_link.paid webhook did not contain a payment_link entity",
+            metadata={"webhook_event_id": webhook_event.id},
+        )
+        return
+
+    # Require explicit correlation reference. Never guess correlation.
+    ref_id = plink_entity.notes.get("execution_reference_id")
+    
+    if not ref_id:
+        append_audit_log(
+            db,
+            event_type="PAYMENT_LINK_PAID",
+            action="SKIP_MISSING_REFERENCE",
+            reason="payment_link.paid webhook did not contain an execution_reference_id in notes",
+            metadata={"webhook_event_id": webhook_event.id},
+        )
+        return
+    
+    decision = (
+        db.query(RecoveryDecision)
+        .filter(RecoveryDecision.execution_reference_id == ref_id)
+        .first()
+    )
+    
+    if not decision:
+        append_audit_log(
+            db,
+            event_type="PAYMENT_LINK_PAID",
+            action="SKIP_UNMATCHED_REFERENCE",
+            reason=f"No RecoveryDecision found for reference {ref_id}",
+            metadata={"webhook_event_id": webhook_event.id, "execution_reference_id": ref_id},
+        )
+        return
+        
+    update_recovery_decision_outcome(db, decision)
+    
+    append_audit_log(
+        db,
+        event_type="PAYMENT_LINK_PAID",
+        action="OUTCOME_OBSERVED",
+        payment_record_id=decision.payment_record_id,
+        reason="payment_link.paid successfully mapped to recovery decision.",
+        metadata={"recovery_decision_id": decision.id, "execution_reference_id": ref_id},
+    )
+    logger.info("payment_link.paid processed. loop closed for decision %s", decision.id)
+

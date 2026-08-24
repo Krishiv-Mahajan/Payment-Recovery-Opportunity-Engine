@@ -53,6 +53,11 @@ class PolicyPrediction:
     model_version: str
     reasoning: str  # Human-readable explanation — for audit trail
 
+    predicted_p0: float | None = None
+    predicted_p1: float | None = None
+    predicted_uplift: float | None = None
+    expected_incremental_net_paise: int | None = None
+
 
 class PlaceholderPredictor:
     """
