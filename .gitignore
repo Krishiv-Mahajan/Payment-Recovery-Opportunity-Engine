@@ -55,3 +55,7 @@ Icon
 
 # mypy / type checking
 .mypy_cache/
+
+# Phase 3 trained model artifacts — reproducible from seed, never committed
+artifacts/
+*.joblib
