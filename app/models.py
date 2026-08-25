@@ -281,6 +281,10 @@ class RecoveryDecision(Base):
         String(64), nullable=False, default="placeholder-v0"
     )
 
+    # Experiment Tracking
+    experiment_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    experiment_variant: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     # Predictive Metrics
     predicted_p0: Mapped[float | None] = mapped_column(Float, nullable=True)
     predicted_p1: Mapped[float | None] = mapped_column(Float, nullable=True)

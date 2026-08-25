@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # the same customer_identifier within this window.
     cooldown_hours: int = 48
 
+    # ── Experimentation ────────────────────────────────────────────────────
+    experiment_name: str | None = None
+    control_percentage: int = 50
+
     def __repr__(self) -> str:
         # Deliberately omit secrets from repr/log output
         return (

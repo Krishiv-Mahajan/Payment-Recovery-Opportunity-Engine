@@ -22,8 +22,8 @@ webhooks_received_total = Counter(
 # ── Policy decisions ───────────────────────────────────────────────────────────
 decisions_total = Counter(
     "roe_decision_total",
-    "Recovery decisions made, labelled by selected action",
-    labelnames=["action"],
+    "Recovery decisions made, labelled by selected action and variant",
+    labelnames=["action", "variant"],
 )
 
 # ── Executions ─────────────────────────────────────────────────────────────────
@@ -36,7 +36,8 @@ executions_total = Counter(
 # ── Closed-loop outcomes ───────────────────────────────────────────────────────
 outcomes_observed_total = Counter(
     "roe_outcome_observed_total",
-    "Closed-loop payment outcomes observed (payment_link.paid mapped to RecoveryDecision)",
+    "Closed-loop payment outcomes observed, labelled by variant",
+    labelnames=["variant"],
 )
 
 # ── Guardrail overrides ────────────────────────────────────────────────────────

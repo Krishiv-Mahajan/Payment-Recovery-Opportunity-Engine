@@ -686,3 +686,35 @@ class TestPaymentLinkPaidProcessing:
             decision = session.query(RecoveryDecision).first()
             assert decision.decision_status == DecisionStatus.OUTCOME_OBSERVED
             assert decision.outcome_observed_at is not None
+
+class TestExperimentPipeline:
+    """Test experiment assignment integration in the webhook pipeline."""
+
+    def test_control_bypasses_ml_policy_and_produces_no_action(self, client, db_engine, monkeypatch):
+        # Force the experiment engine to always return "control"
+        from app.experiment import ExperimentEngine
+        monkeypatch.setattr(ExperimentEngine, "assign_variant", lambda self, id: "control")
+
+        make_signed_request(client, PAYMENT_FAILED_PAYLOAD)
+
+        from sqlalchemy.orm import sessionmaker
+        Session = sessionmaker(bind=db_engine)
+        with Session() as session:
+            decision = session.query(RecoveryDecision).first()
+            assert decision.experiment_variant == "control"
+            assert decision.selected_action == RecoveryAction.NO_ACTION
+            assert decision.model_version == "control_baseline"
+
+    def test_treatment_invokes_ml_policy(self, client, db_engine, monkeypatch):
+        # Force the experiment engine to always return "treatment"
+        from app.experiment import ExperimentEngine
+        monkeypatch.setattr(ExperimentEngine, "assign_variant", lambda self, id: "treatment")
+
+        make_signed_request(client, PAYMENT_FAILED_PAYLOAD)
+
+        from sqlalchemy.orm import sessionmaker
+        Session = sessionmaker(bind=db_engine)
+        with Session() as session:
+            decision = session.query(RecoveryDecision).first()
+            assert decision.experiment_variant == "treatment"
+            assert decision.model_version != "control_baseline"

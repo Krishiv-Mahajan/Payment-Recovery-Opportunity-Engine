@@ -62,6 +62,7 @@ from app.metrics import (
 )
 from app.models import RecoveryAction, RecoveryDecision, WebhookEvent, WebhookProcessingStatus
 from app.schemas import RazorpayWebhookPayload
+from app.ml.predictor import PolicyPrediction
 
 logger = logging.getLogger(__name__)
 
@@ -219,10 +220,40 @@ def _handle_payment_failed(
         metadata=features.to_dict(),
     )
 
-    # 1. Economic Prediction (timed for metrics)
-    t0 = time.monotonic()
-    prediction = app_state.predictor.predict(features)
-    model_prediction_duration_seconds.observe(time.monotonic() - t0)
+    # Experiment Assignment
+    from app.config import get_settings
+    from app.experiment import ExperimentEngine
+    from app.models import DecisionStatus
+
+    settings = get_settings()
+    experiment = ExperimentEngine(
+        experiment_name=settings.experiment_name,
+        control_percentage=settings.control_percentage,
+    )
+
+    assignment_id = (
+        payment_record.customer_email or
+        payment_record.customer_contact or
+        payment_record.razorpay_payment_id
+    )
+    # Ensure it's lowercase if it's an email, to match normalizations elsewhere
+    if payment_record.customer_email:
+        assignment_id = assignment_id.lower()
+
+    variant = experiment.assign_variant(assignment_id)
+
+    if variant == "control":
+        prediction = PolicyPrediction(
+            decision_status=DecisionStatus.DECIDED,
+            selected_action=RecoveryAction.NO_ACTION,
+            model_version="control_baseline",
+            reasoning="Assigned to control group",
+        )
+    else:
+        # 1. Economic Prediction (timed for metrics)
+        t0 = time.monotonic()
+        prediction = app_state.predictor.predict(features)
+        model_prediction_duration_seconds.observe(time.monotonic() - t0)
 
     # 2. Guardrails (Operational Safety)
     original_action = prediction.selected_action
@@ -240,12 +271,14 @@ def _handle_payment_failed(
             guardrail_overrides_total.labels(rule="model_fallback").inc()
 
     # Track decision
-    decisions_total.labels(action=safe_prediction.selected_action.value).inc()
+    decisions_total.labels(action=safe_prediction.selected_action.value, variant=variant).inc()
 
     recovery_decision = create_recovery_decision(
         db,
         payment_record_id=payment_record.id,
         prediction=safe_prediction,
+        experiment_name=settings.experiment_name,
+        experiment_variant=variant,
     )
 
     append_audit_log(
@@ -258,6 +291,7 @@ def _handle_payment_failed(
             "decision_status": safe_prediction.decision_status,
             "selected_action": safe_prediction.selected_action,
             "model_version": safe_prediction.model_version,
+            "experiment_variant": variant,
             "recovery_decision_id": recovery_decision.id,
         },
     )
@@ -485,7 +519,7 @@ def _handle_payment_link_paid(
 ) -> None:
     """
     Handle a payment_link.paid event.
-    
+
     Extracts the execution_reference_id and closes the loop by setting OUTCOME_OBSERVED.
     """
     plink_entity = payload.extract_payment_link_entity()
@@ -501,7 +535,7 @@ def _handle_payment_link_paid(
 
     # Require explicit correlation reference. Never guess correlation.
     ref_id = plink_entity.notes.get("execution_reference_id")
-    
+
     if not ref_id:
         append_audit_log(
             db,
@@ -511,7 +545,7 @@ def _handle_payment_link_paid(
             metadata={"webhook_event_id": webhook_event.id},
         )
         return
-    
+
     decision = (
         db.query(RecoveryDecision)
         .filter(RecoveryDecision.execution_reference_id == ref_id)
@@ -529,7 +563,7 @@ def _handle_payment_link_paid(
         return
 
     update_recovery_decision_outcome(db, decision)
-    outcomes_observed_total.inc()
+    outcomes_observed_total.labels(variant=decision.experiment_variant or "legacy").inc()
 
     append_audit_log(
         db,

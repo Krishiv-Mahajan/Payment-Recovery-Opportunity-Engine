@@ -302,6 +302,8 @@ def create_recovery_decision(
     *,
     payment_record_id: int,
     prediction: PolicyPrediction,
+    experiment_name: str | None = None,
+    experiment_variant: str | None = None,
 ) -> RecoveryDecision:
     """
     Insert a RecoveryDecision record.
@@ -311,13 +313,17 @@ def create_recovery_decision(
     Args:
         db: Active session.
         payment_record_id: FK to the PaymentRecord this decision is for.
-        prediction: Output from the policy predictor.
+        prediction: Output from the policy predictor (or control baseline).
+        experiment_name: Configured experiment name (e.g. "ml_policy_v1")
+        experiment_variant: Deterministic variant ("control" or "treatment")
     """
     decision = RecoveryDecision(
         payment_record_id=payment_record_id,
         decision_status=prediction.decision_status,
         selected_action=prediction.selected_action,
         model_version=prediction.model_version,
+        experiment_name=experiment_name,
+        experiment_variant=experiment_variant,
         predicted_p0=prediction.predicted_p0,
         predicted_p1=prediction.predicted_p1,
         predicted_uplift=prediction.predicted_uplift,
