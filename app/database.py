@@ -83,12 +83,29 @@ def get_db() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     """
-    Create all tables defined in ORM models.
+    Initialize the database.
 
-    Called once at application startup. Safe to call multiple times —
-    SQLAlchemy uses CREATE TABLE IF NOT EXISTS semantics.
+    In test environments (app_env='test'), uses SQLAlchemy create_all() for
+    in-memory SQLite databases (Alembic is not used in tests).
+
+    In all other environments, Alembic migrations are the authoritative schema
+    manager. create_all() is NOT called to avoid conflicts with Alembic-managed
+    schemas.
     """
-    # Import models here to register them with Base.metadata before create_all
+    from app.config import get_settings
+
+    settings = get_settings()
+
+    # Import models so they register with Base.metadata
     import app.models  # noqa: F401
 
-    Base.metadata.create_all(bind=engine)
+    if settings.app_env == "test":
+        # Tests use in-memory SQLite — Alembic not applicable
+        Base.metadata.create_all(bind=engine)
+    else:
+        # Alembic is authoritative: run pending migrations at startup
+        from alembic.config import Config as AlembicConfig
+        from alembic import command as alembic_command
+
+        alembic_cfg = AlembicConfig("alembic.ini")
+        alembic_command.upgrade(alembic_cfg, "head")

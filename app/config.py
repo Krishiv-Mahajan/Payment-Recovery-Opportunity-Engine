@@ -41,6 +41,18 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
+    # ── Executor ───────────────────────────────────────────────────────────
+    # Controls which PaymentLinkProvider implementation is used at startup.
+    # 'mock' is the permanent default — safe for tests and local development.
+    # 'razorpay' requires RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to be set.
+    # Real Razorpay calls NEVER happen unless EXECUTOR_MODE=razorpay is explicit.
+    executor_mode: str = "mock"  # Literal["mock", "razorpay"]
+
+    # ── Guardrails ─────────────────────────────────────────────────────────
+    # Cooldown window in hours. The cooldown guardrail blocks re-outreach to
+    # the same customer_identifier within this window.
+    cooldown_hours: int = 48
+
     def __repr__(self) -> str:
         # Deliberately omit secrets from repr/log output
         return (

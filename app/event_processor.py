@@ -35,11 +35,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.crud import (
     append_audit_log,
+    create_customer_outreach_event,
     create_recovery_decision,
     update_recovery_decision_execution,
     update_recovery_decision_outcome,
@@ -49,6 +52,14 @@ from app.crud import (
     upsert_payment_record_from_order_paid,
 )
 from app.ml.features import extract_features
+from app.metrics import (
+    decisions_total,
+    executions_total,
+    guardrail_overrides_total,
+    model_prediction_duration_seconds,
+    outcomes_observed_total,
+    webhooks_received_total,
+)
 from app.models import RecoveryAction, RecoveryDecision, WebhookEvent, WebhookProcessingStatus
 from app.schemas import RazorpayWebhookPayload
 
@@ -80,6 +91,9 @@ def process_webhook_event(
         parsed_payload: Validated Pydantic model of the webhook body.
     """
     event_type = parsed_payload.event
+
+    # Increment webhook counter (low-cardinality label)
+    webhooks_received_total.labels(event_type=event_type).inc()
 
     try:
         update_webhook_status(db, webhook_event, WebhookProcessingStatus.PROCESSING)
@@ -205,11 +219,28 @@ def _handle_payment_failed(
         metadata=features.to_dict(),
     )
 
-    # 1. Economic Prediction
+    # 1. Economic Prediction (timed for metrics)
+    t0 = time.monotonic()
     prediction = app_state.predictor.predict(features)
-    
+    model_prediction_duration_seconds.observe(time.monotonic() - t0)
+
     # 2. Guardrails (Operational Safety)
+    original_action = prediction.selected_action
     safe_prediction = app_state.guardrails.evaluate(db, payment_record, prediction)
+
+    # Track guardrail overrides
+    if safe_prediction.selected_action != original_action:
+        # Determine which guardrail fired based on reasoning keyword
+        reasoning = (safe_prediction.reasoning or "").lower()
+        if "cooldown" in reasoning:
+            guardrail_overrides_total.labels(rule="cooldown").inc()
+        elif "duplicate" in reasoning:
+            guardrail_overrides_total.labels(rule="duplicate").inc()
+        elif "unavailable" in reasoning or "fallback" in reasoning:
+            guardrail_overrides_total.labels(rule="model_fallback").inc()
+
+    # Track decision
+    decisions_total.labels(action=safe_prediction.selected_action.value).inc()
 
     recovery_decision = create_recovery_decision(
         db,
@@ -234,42 +265,81 @@ def _handle_payment_failed(
     # 3. Action Execution (Synchronous Outbox Simulation)
     if safe_prediction.selected_action != RecoveryAction.NO_ACTION:
         # Step A: Persist execution intent first to avoid dual-write vulnerability.
-        # This commits the WebhookEvent, PaymentRecord, and RecoveryDecision(DECIDED).
+        # DECIDED is committed durably before any external API call.
+        # If the external call fails, the DECIDED record survives and can be
+        # retried by a future async worker (Phase 6+).
         db.commit()
 
-        try:
-            # Step B: Execute Mock Provider
-            idempotency_key = f"exec_rd_{recovery_decision.id}"
-            execution_reference_id = app_state.executor.create_payment_link(
-                recovery_decision, idempotency_key
+        # Step B: Build internal correlation token
+        # This is NOT a Razorpay idempotency header (unsupported for this endpoint).
+        # It is embedded in the payment link notes so payment_link.paid can
+        # correlate back to the RecoveryDecision.
+        execution_reference_id = f"exec_rd_{recovery_decision.id}"
+
+        # Audit when customer_identifier is absent (cooldown fail-open case)
+        customer_identifier = (
+            payment_record.customer_email or payment_record.customer_contact
+        )
+        if customer_identifier is None:
+            append_audit_log(
+                db,
+                event_type="ACTION_EXECUTED",
+                action="COOLDOWN_SKIP_NO_IDENTIFIER",
+                payment_record_id=payment_record.id,
+                reason="No customer_identifier available; cooldown tracking skipped for this outreach.",
+                metadata={"recovery_decision_id": recovery_decision.id},
             )
-            
-            # Step C: Update Execution Result
+
+        try:
+            # Step C: Execute the provider (mock or real Razorpay)
+            plink_id = app_state.executor.create_payment_link(
+                recovery_decision, execution_reference_id
+            )
+
+            # Step D: Update execution result (stores Razorpay plink_id)
             update_recovery_decision_execution(db, recovery_decision, execution_reference_id)
-            
+
+            # Step E: Insert CustomerOutreachEvent for cooldown tracking
+            if customer_identifier is not None:
+                normalized = (
+                    customer_identifier.lower()
+                    if payment_record.customer_email
+                    else customer_identifier
+                )
+                create_customer_outreach_event(
+                    db,
+                    customer_identifier=normalized,
+                    payment_record_id=payment_record.id,
+                    recovery_decision_id=recovery_decision.id,
+                    action=safe_prediction.selected_action.value,
+                    channel="payment_link",
+                )
+
+            executions_total.labels(status="success").inc()
+
             append_audit_log(
                 db,
                 event_type="ACTION_EXECUTED",
                 action="CREATE_PAYMENT_LINK",
                 payment_record_id=payment_record.id,
-                reason=f"Successfully created payment link: {execution_reference_id}",
+                reason=f"Payment link created: {plink_id} (execution_reference_id={execution_reference_id})",
                 metadata={"execution_reference_id": execution_reference_id},
             )
             # The outer webhooks.py loop will commit this final state update.
         except Exception as exc:
-            logger.error("Action execution failed: %s", exc)
+            executions_total.labels(status="failure").inc()
+            logger.error("Action execution failed for decision %s: %s", recovery_decision.id, exc)
             append_audit_log(
                 db,
                 event_type="ACTION_EXECUTION_FAILED",
                 action="CREATE_PAYMENT_LINK_FAILED",
                 payment_record_id=payment_record.id,
                 reason=f"Failed to create payment link: {exc}",
-                metadata={"error": str(exc)},
+                metadata={"error": str(exc), "recovery_decision_id": recovery_decision.id},
             )
-            db.commit() # Ensure failure log is persisted
-            # In a full outbox pattern, an async worker would retry DECIDED records.
-            # We swallow the error here so the webhook succeeds and Razorpay doesn't retry,
-            # as our guardrails would incorrectly block a direct webhook retry.
+            db.commit()  # Persist failure log; DECIDED record remains durable
+            # A future async worker (Phase 6+) can process DECIDED records for retry.
+            # We do NOT retry here to keep the webhook path synchronous and safe.
 
     logger.info(
         "payment.failed processed: payment_id=%s decision=%s action=%s",
@@ -447,7 +517,7 @@ def _handle_payment_link_paid(
         .filter(RecoveryDecision.execution_reference_id == ref_id)
         .first()
     )
-    
+
     if not decision:
         append_audit_log(
             db,
@@ -457,9 +527,10 @@ def _handle_payment_link_paid(
             metadata={"webhook_event_id": webhook_event.id, "execution_reference_id": ref_id},
         )
         return
-        
+
     update_recovery_decision_outcome(db, decision)
-    
+    outcomes_observed_total.inc()
+
     append_audit_log(
         db,
         event_type="PAYMENT_LINK_PAID",

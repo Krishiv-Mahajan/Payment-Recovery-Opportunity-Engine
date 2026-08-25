@@ -1,14 +1,21 @@
 """
-Action Execution Layer.
+Action Execution Layer — PaymentLinkProvider abstraction.
 
-This module is responsible for dispatching approved recovery actions to external services
-(e.g., Razorpay APIs for Payment Links).
+This module defines the PaymentLinkProvider Protocol and the
+MockPaymentLinkProvider used by default (EXECUTOR_MODE=mock).
 
-Phase 4 introduces the abstractions but uses MockPaymentLinkProvider to avoid external calls.
+The real Razorpay implementation lives in app/executor_razorpay.py.
+The event_processor depends only on the PaymentLinkProvider Protocol —
+it never imports RazorpayPaymentLinkProvider directly.
+
+Executor mode is controlled by EXECUTOR_MODE environment variable:
+  mock    (default) — no network calls, safe for tests and local dev
+  razorpay          — real Razorpay API (requires credentials)
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Protocol
 
@@ -18,19 +25,31 @@ logger = logging.getLogger(__name__)
 
 
 class PaymentLinkProvider(Protocol):
-    """Protocol for creating payment links."""
+    """
+    Protocol for creating payment links.
 
-    def create_payment_link(self, decision: RecoveryDecision, idempotency_key: str) -> str:
+    Implementations must be safe to swap at dependency injection time.
+    The event_processor depends on this protocol, not on any concrete class.
+    """
+
+    def create_payment_link(
+        self,
+        decision: RecoveryDecision,
+        execution_reference_id: str,
+    ) -> str:
         """
         Create a payment link for the given recovery decision.
 
         Args:
             decision: The approved RecoveryDecision to execute.
-            idempotency_key: Stable idempotency key for external API.
+            execution_reference_id: Stable internal token used to:
+                1. Embed in payment link notes for payment_link.paid correlation.
+                2. Generate deterministic mock link IDs for safe retries.
+                This is NOT a Razorpay idempotency header (unsupported by this endpoint).
 
         Returns:
-            The external reference ID (e.g., payment link ID).
-            
+            The external reference ID (e.g., Razorpay plink_... ID or mock ID).
+
         Raises:
             Exception if execution fails.
         """
@@ -39,24 +58,34 @@ class PaymentLinkProvider(Protocol):
 
 class MockPaymentLinkProvider:
     """
-    Mock implementation of PaymentLinkProvider for Phase 4.
-    Simulates API execution without making real HTTP calls.
+    Mock implementation of PaymentLinkProvider.
+
+    Default for EXECUTOR_MODE=mock (the permanent default).
+    Simulates payment link creation without making any network calls.
+
+    The returned mock ID is deterministic: same execution_reference_id
+    always produces the same mock plink ID, making retries safe without
+    Razorpay's API involvement.
     """
 
-    def create_payment_link(self, decision: RecoveryDecision, idempotency_key: str) -> str:
-        # Use idempotency key to generate a stable mock ID
-        # If the same idempotency key is passed, we return the same mock ID.
-        import hashlib
-        key_hash = hashlib.sha1(idempotency_key.encode()).hexdigest()[:8]
+    def create_payment_link(
+        self,
+        decision: RecoveryDecision,
+        execution_reference_id: str,
+    ) -> str:
+        # Deterministic mock ID derived from execution_reference_id
+        key_hash = hashlib.sha1(execution_reference_id.encode()).hexdigest()[:8]
         mock_plink_id = f"plink_mock_{key_hash}"
-        
-        # In a real provider, we would pass `decision.id` or `payment_record.id`
-        # in the 'notes' field of the Razorpay request so it comes back to us in the webhook.
-        
+
+        # In a real provider, execution_reference_id would be passed in
+        # the 'notes' field of the Razorpay API request so it comes back
+        # unchanged in the payment_link.paid webhook.
+
         logger.info(
-            "Mock execution: created payment link %s for decision %s using key %s",
+            "Mock execution: created payment link %s for decision %s "
+            "(execution_reference_id=%s)",
             mock_plink_id,
             decision.id,
-            idempotency_key,
+            execution_reference_id,
         )
         return mock_plink_id

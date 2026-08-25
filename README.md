@@ -1,11 +1,10 @@
 # Recovery Opportunity Engine
 
-**Razorpay Buildathon Track 03 — Phase 1**
+**Razorpay Buildathon Track 03 — Phase 5**
 
 An AI-driven revenue recovery decision engine that evaluates failed Razorpay payments and decides whether and how to intervene.
 
-> **Phase 1 scope**: This version is the event ingestion foundation only.
-> No ML model, no recovery actions, no frontend.
+> **Phase 5 scope**: This version is production-ready, featuring an S-Learner ML policy, operational safety guardrails, a simulated outbox executor, live Razorpay Payment Link integration, and Prometheus metrics.
 > See [What is NOT implemented yet](#what-is-not-implemented-yet) for the full boundary.
 
 ---
@@ -29,27 +28,29 @@ Treating **DO NOTHING** as a first-class, legitimate action.
 
 ---
 
-## Phase 1: What Is Implemented
+## Phase 5: What Is Implemented
 
-This phase builds the event ingestion foundation:
+The system is now fully closed-loop:
 
-```
-Razorpay webhook
+Razorpay webhook (payment.failed)
     ↓
-Signature verification (HMAC-SHA256)
+Signature verification & Idempotency Check
     ↓
-Idempotent event processing (Razorpay event ID as idempotency key)
+Event normalization (PaymentRecord)
     ↓
-Event normalization (payment.failed / payment.captured / order.paid)
+Feature Extraction (customer history & payment dimensions)
     ↓
-SQLite persistence (WebhookEvent, PaymentRecord)
+ML Policy Prediction (S-Learner predicts P0, P1, Uplift)
     ↓
-Feature extraction (payment dimensions + customer history counts)
+GuardrailsEngine (blocks duplicates, handles model fallback, enforces 48h cooldown)
     ↓
-Placeholder decision record (PENDING_POLICY / NO_ACTION)
+RecoveryDecision (persisted as DECIDED)
     ↓
-Audit log
-```
+Action Execution (Mock or real Razorpay Payment Links API)
+    ↓
+Execution Correlation & Audit Logs
+    ↓
+payment_link.paid webhook closes the loop (OUTCOME_OBSERVED)
 
 ### Endpoints
 
@@ -58,6 +59,7 @@ Audit log
 | `POST` | `/webhooks/razorpay` | Razorpay webhook receiver |
 | `GET`  | `/health` | Liveness check |
 | `GET`  | `/events/{event_id}` | Retrieve a webhook event by Razorpay event ID |
+| `GET`  | `/metrics` | Prometheus operational metrics |
 
 ### Database Tables
 
@@ -65,28 +67,22 @@ Audit log
 |-------|---------|
 | `webhook_events` | Raw event storage, signature status, processing lifecycle |
 | `payment_records` | Normalized payment entity — updated by subsequent events |
-| `recovery_decisions` | Decision output per failed payment (Phase 1: always `PENDING_POLICY`) |
+| `recovery_decisions` | ML predictions, execution reference, and outcome tracking |
 | `audit_logs` | Immutable append-only processing history |
+| `alembic_version` | Tracks database migration state |
+| `customer_outreach_events` | Tracks outreach actions for operational cooldown guardrails |
 
 ---
 
 ## What Is NOT Implemented Yet
 
-This is explicit — not an oversight.
-
 | Feature | Reason deferred |
 |---------|-----------------|
-| ML / uplift model | No valid training data exists yet |
-| S-learner / causal model | Requires simulator data first |
-| Simulator / synthetic data | Phase 2 milestone |
-| A/B experimentation framework | Phase 3 milestone |
-| Recovery action execution | Requires policy engine + guardrails |
-| Payment link creation | Phase 2+ |
-| Discounts | Phase 3+ |
-| WhatsApp / SMS / email | Phase 2+ |
-| Dashboard / frontend | Phase 4+ |
-| PostgreSQL migration | Architecture supports it; not needed yet |
-| Redis / Kafka / microservices | Not needed — explicitly excluded |
+| A/B experimentation framework | Planned for Phase 6 |
+| WhatsApp / SMS / email channels | Currently limited to Payment Links |
+| Dashboard / frontend | Planned for Phase 7 |
+| PostgreSQL migration | Architecture supports it via Alembic; not needed for local dev |
+| Redis / Kafka | Outbox is simulated synchronously for simplicity |
 
 ---
 
@@ -129,12 +125,12 @@ DATABASE_URL=sqlite:///./roe.db
 
 | Variable | Description |
 |----------|-------------|
-| `RAZORPAY_KEY_ID` | Razorpay test-mode API key ID (starts with `rzp_test_`) |
+| `RAZORPAY_KEY_ID` | Razorpay test-mode API key ID |
 | `RAZORPAY_KEY_SECRET` | Razorpay test-mode API key secret |
-| `RAZORPAY_WEBHOOK_SECRET` | Webhook signing secret from Razorpay Dashboard → Settings → Webhooks |
-| `DATABASE_URL` | SQLite path for development; swap to `postgresql+psycopg2://...` for production |
-
-> **NEVER commit `.env`** — it is gitignored. Only `.env.example` is committed.
+| `RAZORPAY_WEBHOOK_SECRET` | Webhook signing secret |
+| `DATABASE_URL` | SQLAlchemy connection string |
+| `EXECUTOR_MODE` | `mock` (default) or `razorpay` (requires valid keys) |
+| `COOLDOWN_HOURS` | Number of hours before a customer can be contacted again (default: 48) |
 
 ---
 
@@ -177,9 +173,15 @@ pytest tests/test_policy.py -v
 | Test File | Covers |
 |-----------|--------|
 | `test_signature.py` | Signature verification (valid, invalid, missing, no secret) |
-| `test_processing.py` | Webhook processing, duplicate handling, event normalization, out-of-order events |
+| `test_processing.py` | Webhook processing, duplicate handling, event normalization, outcomes |
 | `test_features.py` | Feature extraction: field values, history counts, None handling |
-| `test_policy.py` | Placeholder predictor interface, /health endpoint |
+| `test_policy.py` | ML predictor interface |
+| `test_guardrails.py` | Operational safety: Duplicate prevention, Model fallback, 48h Cooldown |
+| `test_executor.py` | Mock executor determinism and abstraction |
+| `test_razorpay_executor.py` | Razorpay API request building and error handling (mocked network) |
+| `test_metrics.py` | Prometheus metrics formatting and high-cardinality absence |
+| `test_migrations.py` | Alembic up/down migrations |
+| `test_lifespan.py` | Startup configuration, executor selection, model loading |
 
 ---
 

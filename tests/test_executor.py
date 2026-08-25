@@ -11,7 +11,7 @@ def test_executor_idempotency():
     provider = MockPaymentLinkProvider()
     decision = RecoveryDecision(id=100)
     
-    key = "idem_key_123"
+    key = "exec_rd_123"
     ref1 = provider.create_payment_link(decision, key)
     ref2 = provider.create_payment_link(decision, key)
     
@@ -23,7 +23,7 @@ def test_executor_abstraction():
     from app.executor import PaymentLinkProvider
     
     class DummyProvider:
-        def create_payment_link(self, decision: RecoveryDecision, idempotency_key: str) -> str:
+        def create_payment_link(self, decision: RecoveryDecision, execution_reference_id: str) -> str:
             return "dummy_id"
             
     # DummyProvider must be compatible with PaymentLinkProvider protocol

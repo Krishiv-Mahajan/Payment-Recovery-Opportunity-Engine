@@ -623,3 +623,66 @@ class TestMalformedPayload:
             },
         )
         assert response.status_code == 200
+
+class TestPaymentLinkPaidProcessing:
+    """Test payment_link.paid event processing (Phase 5)."""
+
+    def test_payment_link_paid_updates_outcome(self, client, db_engine):
+        """payment_link.paid maps to RecoveryDecision and sets OUTCOME_OBSERVED."""
+        # 1. Manually setup a decision with execution_reference_id
+        from sqlalchemy.orm import sessionmaker
+        Session = sessionmaker(bind=db_engine)
+
+        with Session() as session:
+            record = PaymentRecord(
+                razorpay_payment_id="pay_test000000004",
+                amount=1000,
+                currency="INR",
+                status="failed"
+            )
+            session.add(record)
+            session.commit()
+
+            decision = RecoveryDecision(
+                payment_record_id=record.id,
+                decision_status=DecisionStatus.EXECUTED,
+                selected_action=RecoveryAction.SEND_PAYMENT_LINK,
+                model_version="test",
+                execution_reference_id="exec_rd_999"
+            )
+            session.add(decision)
+            session.commit()
+
+            ref_id = "exec_rd_999"
+
+        # 2. Build payment_link.paid payload
+        plink_payload = {
+            "entity": "event",
+            "account_id": "acc_test000000001",
+            "event": "payment_link.paid",
+            "contains": ["payment_link"],
+            "payload": {
+                "payment_link": {
+                    "entity": {
+                        "id": "plink_test000000001",
+                        "entity": "payment_link",
+                        "status": "paid",
+                        "notes": {
+                            "execution_reference_id": ref_id
+                        }
+                    }
+                }
+            },
+            "created_at": 1700001000,
+            "id": "evt_test000000004",
+        }
+
+        # 3. Process payment_link.paid
+        r2, _ = make_signed_request(client, plink_payload)
+        assert r2.status_code == 200
+
+        # 4. Verify outcome observed
+        with Session() as session:
+            decision = session.query(RecoveryDecision).first()
+            assert decision.decision_status == DecisionStatus.OUTCOME_OBSERVED
+            assert decision.outcome_observed_at is not None

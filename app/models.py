@@ -361,3 +361,56 @@ class AuditLog(Base):
             f"event_type={self.event_type!r} "
             f"action={self.action!r}>"
         )
+
+
+class CustomerOutreachEvent(Base):
+    """
+    Records each outreach action dispatched to a customer.
+
+    Used by GuardrailsEngine Rule 3 (cooldown) to prevent re-contacting the
+    same customer within a configurable window.
+
+    customer_identifier is the normalized email (lowercased) or contact number
+    from the PaymentRecord, resolved using the same priority order as
+    extract_features(): email first, contact second, None if both absent.
+
+    If customer_identifier is None at execution time, no row is inserted here
+    and the cooldown rule cannot fire for this outreach event.
+    """
+
+    __tablename__ = "customer_outreach_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Normalized email or contact — the cooldown lookup key
+    customer_identifier: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True
+    )
+
+    payment_record_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("payment_records.id"), nullable=False
+    )
+
+    recovery_decision_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("recovery_decisions.id"), nullable=False
+    )
+
+    # RecoveryAction enum value as string (not using native enum to stay SQLite/PG compatible)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Outreach channel (e.g., "payment_link") — for future multi-channel cooldowns
+    channel: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    outreach_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default=func.now(),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<CustomerOutreachEvent id={self.id} "
+            f"customer={self.customer_identifier!r} "
+            f"action={self.action!r} at={self.outreach_at}>"
+        )

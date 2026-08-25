@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     AuditLog,
+    CustomerOutreachEvent,
     DecisionStatus,
     PaymentRecord,
     PaymentStatus,
@@ -387,3 +388,64 @@ def append_audit_log(
     db.add(log)
     db.flush()
     return log
+
+
+def create_customer_outreach_event(
+    db: Session,
+    *,
+    customer_identifier: str,
+    payment_record_id: int,
+    recovery_decision_id: int,
+    action: str,
+    channel: str,
+) -> CustomerOutreachEvent:
+    """
+    Record a customer outreach action for cooldown tracking.
+
+    Args:
+        db: Active database session (caller owns transaction).
+        customer_identifier: Normalized email or contact (never None — callers must check).
+        payment_record_id: FK to the associated PaymentRecord.
+        recovery_decision_id: FK to the associated RecoveryDecision.
+        action: RecoveryAction enum value string (e.g., 'SEND_PAYMENT_LINK').
+        channel: Outreach channel string (e.g., 'payment_link').
+
+    Returns:
+        The newly created CustomerOutreachEvent (not yet committed).
+    """
+    event = CustomerOutreachEvent(
+        customer_identifier=customer_identifier,
+        payment_record_id=payment_record_id,
+        recovery_decision_id=recovery_decision_id,
+        action=action,
+        channel=channel,
+    )
+    db.add(event)
+    db.flush()
+    return event
+
+
+def get_recent_outreach_for_customer(
+    db: Session,
+    customer_identifier: str,
+    since: datetime,
+) -> CustomerOutreachEvent | None:
+    """
+    Return the most recent CustomerOutreachEvent for a customer within a time window.
+
+    Returns None if no outreach occurred after `since`.
+
+    Args:
+        db: Active database session.
+        customer_identifier: Normalized email or contact string.
+        since: Cutoff datetime — outreach at or after this time is considered recent.
+    """
+    return (
+        db.query(CustomerOutreachEvent)
+        .filter(
+            CustomerOutreachEvent.customer_identifier == customer_identifier,
+            CustomerOutreachEvent.outreach_at >= since,
+        )
+        .order_by(CustomerOutreachEvent.outreach_at.desc())
+        .first()
+    )
