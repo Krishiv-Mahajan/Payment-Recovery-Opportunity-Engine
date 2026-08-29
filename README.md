@@ -1,7 +1,5 @@
 # Recovery Opportunity Engine
 
-**Razorpay Buildathon Track 03 — Phase 5**
-
 An AI-driven revenue recovery decision engine that evaluates failed Razorpay payments and decides whether and how to intervene.
 
 > **Phase 5 scope**: This version is production-ready, featuring an S-Learner ML policy, operational safety guardrails, a simulated outbox executor, live Razorpay Payment Link integration, and Prometheus metrics.
