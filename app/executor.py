@@ -23,6 +23,38 @@ from app.models import RecoveryDecision
 
 logger = logging.getLogger(__name__)
 
+class PaymentLinkCreationError(Exception):
+    """Base exception for all executor failures."""
+
+class TransientExecutionError(PaymentLinkCreationError):
+    """Raised for retryable failures (e.g. 5xx, timeout, 429, network)."""
+    def __init__(self, message: str, error_type: str):
+        super().__init__(message)
+        self.error_type = error_type
+
+class PermanentExecutionError(PaymentLinkCreationError):
+    """Raised for non-retryable failures (e.g. 400, 401, 403, 422, malformed response)."""
+    def __init__(self, message: str, error_type: str):
+        super().__init__(message)
+        self.error_type = error_type
+
+class DuplicateReferenceExecutionError(PaymentLinkCreationError):
+    """Raised when the executor indicates the reference ID has already been attempted."""
+    def __init__(self, message: str, error_type: str):
+        super().__init__(message)
+        self.error_type = error_type
+
+class AmbiguousStateError(Exception):
+    """Raised when an external action's side-effect cannot be definitively proven."""
+    def __init__(self, message: str, error_type: str = "AMBIGUOUS_STATE"):
+        super().__init__(message)
+        self.error_type = error_type
+
+class ReconciliationError(PaymentLinkCreationError):
+    """Raised when duplicate reference reconciliation fails (e.g., missing, mismatched, or multiple links)."""
+    def __init__(self, message: str, error_type: str):
+        super().__init__(message)
+        self.error_type = error_type
 
 class PaymentLinkProvider(Protocol):
     """
@@ -52,6 +84,28 @@ class PaymentLinkProvider(Protocol):
 
         Raises:
             Exception if execution fails.
+        """
+        ...
+
+    def reconcile_duplicate_reference(
+        self,
+        decision: RecoveryDecision,
+        execution_reference_id: str,
+    ) -> str:
+        """
+        Reconcile a duplicate reference error by finding the existing link.
+        
+        Args:
+            decision: The decision that encountered the duplicate error.
+            execution_reference_id: The execution reference ID.
+            
+        Returns:
+            The external reference ID (e.g., Razorpay plink_...).
+            
+        Raises:
+            TransientExecutionError on retryable lookup failures.
+            PermanentExecutionError on non-retryable lookup failures.
+            ReconciliationError if the link cannot be safely reconciled.
         """
         ...
 
@@ -88,4 +142,14 @@ class MockPaymentLinkProvider:
             decision.id,
             execution_reference_id,
         )
+        return mock_plink_id
+
+    def reconcile_duplicate_reference(
+        self,
+        decision: RecoveryDecision,
+        execution_reference_id: str,
+    ) -> str:
+        # For mock, we just generate the same deterministic ID.
+        key_hash = hashlib.sha1(execution_reference_id.encode()).hexdigest()[:8]
+        mock_plink_id = f"plink_mock_{key_hash}"
         return mock_plink_id

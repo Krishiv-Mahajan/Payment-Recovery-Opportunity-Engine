@@ -302,7 +302,7 @@ recovery_opportunity_engine/
 
 ## Razorpay API Assumptions
 
-Phase 1 makes the following documented assumptions about Razorpay webhooks:
+Phase 5 makes the following documented assumptions about Razorpay webhooks:
 
 | Assumption | Source |
 |------------|--------|
@@ -314,4 +314,4 @@ Phase 1 makes the following documented assumptions about Razorpay webhooks:
 | `order.paid` may contain both `payload.payment.entity` and `payload.order.entity` | Razorpay docs: order entity |
 | Razorpay retries on non-2xx responses (exponential backoff, up to 24h) | Razorpay docs: webhooks |
 
-**No Razorpay API endpoints are invented.** Phase 1 does not call any Razorpay APIs — it only receives webhooks.
+**No undocumented Razorpay API endpoints are invented.** Phase 5 calls the Payment Links API for recovery interventions.

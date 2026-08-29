@@ -42,9 +42,12 @@ from sqlalchemy.orm import Session
 
 from app.crud import (
     append_audit_log,
+    claim_decision_for_execution,
     create_customer_outreach_event,
     create_recovery_decision,
-    update_recovery_decision_execution,
+    mark_execution_successful,
+    mark_execution_failed_retryable,
+    mark_execution_failed_permanent,
     update_recovery_decision_outcome,
     update_webhook_status,
     upsert_payment_record_from_captured,
@@ -63,6 +66,14 @@ from app.metrics import (
 from app.models import RecoveryAction, RecoveryDecision, WebhookEvent, WebhookProcessingStatus
 from app.schemas import RazorpayWebhookPayload
 from app.ml.predictor import PolicyPrediction
+from app.execution import execute_recovery_decision
+from app.executor import (
+    TransientExecutionError,
+    PermanentExecutionError,
+    DuplicateReferenceExecutionError,
+    ReconciliationError,
+)
+from app.retry_policy import calculate_retry
 
 logger = logging.getLogger(__name__)
 
@@ -299,81 +310,29 @@ def _handle_payment_failed(
     # 3. Action Execution (Synchronous Outbox Simulation)
     if safe_prediction.selected_action != RecoveryAction.NO_ACTION:
         # Step A: Persist execution intent first to avoid dual-write vulnerability.
-        # DECIDED is committed durably before any external API call.
-        # If the external call fails, the DECIDED record survives and can be
-        # retried by a future async worker (Phase 6+).
         db.commit()
 
-        # Step B: Build internal correlation token
-        # This is NOT a Razorpay idempotency header (unsupported for this endpoint).
-        # It is embedded in the payment link notes so payment_link.paid can
-        # correlate back to the RecoveryDecision.
-        execution_reference_id = f"exec_rd_{recovery_decision.id}"
-
-        # Audit when customer_identifier is absent (cooldown fail-open case)
-        customer_identifier = (
-            payment_record.customer_email or payment_record.customer_contact
-        )
-        if customer_identifier is None:
+        # Step A.1: Atomically claim the decision to prevent duplicate execution
+        if not claim_decision_for_execution(db, recovery_decision.id):
+            logger.info("Skipping execution for decision %s: already claimed by another worker.", recovery_decision.id)
             append_audit_log(
                 db,
-                event_type="ACTION_EXECUTED",
-                action="COOLDOWN_SKIP_NO_IDENTIFIER",
+                event_type="ACTION_EXECUTION_SKIPPED",
+                action="CLAIM_FAILED",
                 payment_record_id=payment_record.id,
-                reason="No customer_identifier available; cooldown tracking skipped for this outreach.",
+                reason="Failed to claim decision for execution (likely claimed by concurrent process)",
                 metadata={"recovery_decision_id": recovery_decision.id},
             )
-
-        try:
-            # Step C: Execute the provider (mock or real Razorpay)
-            plink_id = app_state.executor.create_payment_link(
-                recovery_decision, execution_reference_id
-            )
-
-            # Step D: Update execution result (stores Razorpay plink_id)
-            update_recovery_decision_execution(db, recovery_decision, execution_reference_id)
-
-            # Step E: Insert CustomerOutreachEvent for cooldown tracking
-            if customer_identifier is not None:
-                normalized = (
-                    customer_identifier.lower()
-                    if payment_record.customer_email
-                    else customer_identifier
-                )
-                create_customer_outreach_event(
-                    db,
-                    customer_identifier=normalized,
-                    payment_record_id=payment_record.id,
-                    recovery_decision_id=recovery_decision.id,
-                    action=safe_prediction.selected_action.value,
-                    channel="payment_link",
-                )
-
-            executions_total.labels(status="success").inc()
-
-            append_audit_log(
-                db,
-                event_type="ACTION_EXECUTED",
-                action="CREATE_PAYMENT_LINK",
-                payment_record_id=payment_record.id,
-                reason=f"Payment link created: {plink_id} (execution_reference_id={execution_reference_id})",
-                metadata={"execution_reference_id": execution_reference_id},
-            )
-            # The outer webhooks.py loop will commit this final state update.
-        except Exception as exc:
-            executions_total.labels(status="failure").inc()
-            logger.error("Action execution failed for decision %s: %s", recovery_decision.id, exc)
-            append_audit_log(
-                db,
-                event_type="ACTION_EXECUTION_FAILED",
-                action="CREATE_PAYMENT_LINK_FAILED",
-                payment_record_id=payment_record.id,
-                reason=f"Failed to create payment link: {exc}",
-                metadata={"error": str(exc), "recovery_decision_id": recovery_decision.id},
-            )
-            db.commit()  # Persist failure log; DECIDED record remains durable
-            # A future async worker (Phase 6+) can process DECIDED records for retry.
-            # We do NOT retry here to keep the webhook path synchronous and safe.
+            db.commit()
+            return
+            
+        # Commit the claim immediately so the database write lock is released
+        # before we begin the potentially slow external API execution.
+        db.commit()
+        
+        # Must reload the decision from the db since we committed
+        recovery_decision = db.get(RecoveryDecision, recovery_decision.id)
+        execute_recovery_decision(db, recovery_decision, app_state.executor, payment_record)
 
     logger.info(
         "payment.failed processed: payment_id=%s decision=%s action=%s",

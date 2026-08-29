@@ -139,17 +139,36 @@ def db_engine():
     same in-memory database, unlike plain sqlite:///:memory: which gives
     each new connection its own isolated database.
     """
+    import tempfile
+    import os
     import uuid
-    db_name = f"testdb_{uuid.uuid4().hex}"
-    url = f"sqlite:///file:{db_name}?mode=memory&cache=shared&uri=true"
+    from sqlalchemy import event
+
+    # Use a temporary file instead of in-memory shared cache to support WAL mode
+    # and accurate production locking semantics during concurrency tests.
+    fd, path = tempfile.mkstemp(prefix=f"testdb_{uuid.uuid4().hex}_", suffix=".db")
+    os.close(fd)
+    
+    url = f"sqlite:///{path}"
     engine = create_engine(
         url,
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "timeout": 15},
     )
+
+    @event.listens_for(engine, "connect")
+    def set_wal_mode(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
     Base.metadata.create_all(bind=engine)
     yield engine
     Base.metadata.drop_all(bind=engine)
     engine.dispose()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 @pytest.fixture(scope="function")
@@ -192,6 +211,7 @@ def client(db_engine, monkeypatch) -> TestClient:
         razorpay_webhook_secret=TEST_WEBHOOK_SECRET,
         database_url="sqlite:///:memory:",
         app_env="test",
+        executor_mode="mock",
     )
 
     # Clear the lru_cache and patch get_settings everywhere it is imported

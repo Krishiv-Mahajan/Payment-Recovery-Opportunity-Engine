@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # Real Razorpay calls NEVER happen unless EXECUTOR_MODE=razorpay is explicit.
     executor_mode: str = "mock"  # Literal["mock", "razorpay"]
 
+    execution_stale_after_seconds: int = 600
+
+    # ── Background Worker ──────────────────────────────────────────────────
+    worker_enabled: bool = False
+    worker_poll_interval_seconds: int = 5
+    worker_batch_size: int = 10
+
     # ── Guardrails ─────────────────────────────────────────────────────────
     # Cooldown window in hours. The cooldown guardrail blocks re-outreach to
     # the same customer_identifier within this window.

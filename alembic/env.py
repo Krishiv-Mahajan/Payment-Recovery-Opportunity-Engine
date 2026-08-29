@@ -21,7 +21,7 @@ config = context.config
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Model metadata for autogenerate support
 target_metadata = Base.metadata

@@ -28,6 +28,7 @@ import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.crud import append_audit_log, create_webhook_event, update_webhook_status
@@ -175,7 +176,9 @@ async def receive_razorpay_webhook(
 
     # ── Step 6: Process the event ──────────────────────────────────────
     try:
-        process_webhook_event(db, webhook_event, parsed_payload, request.app.state)
+        await run_in_threadpool(
+            process_webhook_event, db, webhook_event, parsed_payload, request.app.state
+        )
         db.commit()
     except Exception as exc:
         logger.exception(

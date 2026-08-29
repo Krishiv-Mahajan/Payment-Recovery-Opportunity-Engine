@@ -16,8 +16,9 @@ hidden nested transactions.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -334,7 +335,86 @@ def create_recovery_decision(
     return decision
 
 
-def update_recovery_decision_execution(
+def get_eligible_recovery_decisions(db: Session, limit: int = 10) -> list[RecoveryDecision]:
+    """
+    Get decisions that are DECIDED, have an action, and are eligible for execution.
+    """
+    now = datetime.now(timezone.utc)
+    return (
+        db.query(RecoveryDecision)
+        .filter(
+            RecoveryDecision.decision_status == DecisionStatus.DECIDED,
+            RecoveryDecision.selected_action != RecoveryAction.NO_ACTION,
+            (RecoveryDecision.next_retry_at == None) | (RecoveryDecision.next_retry_at <= now)
+        )
+        .order_by(RecoveryDecision.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+def claim_decision_for_execution(db: Session, decision_id: int) -> bool:
+    """
+    Atomically claim a decision for execution.
+    Only succeeds if the decision is currently DECIDED.
+    """
+    stmt = (
+        update(RecoveryDecision)
+        .where(
+            RecoveryDecision.id == decision_id,
+            RecoveryDecision.decision_status == DecisionStatus.DECIDED
+        )
+        .values(
+            decision_status=DecisionStatus.EXECUTING,
+            execution_started_at=datetime.now(timezone.utc),
+            execution_attempts=RecoveryDecision.execution_attempts + 1
+        )
+    )
+    result = db.execute(stmt)
+    db.flush()
+    return result.rowcount > 0
+
+
+def claim_stale_execution(db: Session, stale_threshold_seconds: int) -> RecoveryDecision | None:
+    """
+    Find and atomically claim one stale EXECUTING decision for recovery.
+    """
+    threshold_time = datetime.now(timezone.utc) - timedelta(seconds=stale_threshold_seconds)
+    
+    # 1. Find a candidate
+    candidate = db.query(RecoveryDecision).filter(
+        RecoveryDecision.decision_status == DecisionStatus.EXECUTING,
+        RecoveryDecision.execution_started_at < threshold_time
+    ).first()
+    
+    if not candidate:
+        return None
+        
+    # 2. Atomically claim it by advancing the execution_started_at timestamp
+    now = datetime.now(timezone.utc)
+    stmt = (
+        update(RecoveryDecision)
+        .where(
+            RecoveryDecision.id == candidate.id,
+            RecoveryDecision.decision_status == DecisionStatus.EXECUTING,
+            RecoveryDecision.execution_started_at == candidate.execution_started_at
+        )
+        .values(
+            execution_started_at=now
+        )
+    )
+    result = db.execute(stmt)
+    db.flush()
+    
+    if result.rowcount > 0:
+        db.refresh(candidate)
+        return candidate
+    
+    # Someone else claimed it or it changed state
+    return None
+
+
+def mark_execution_successful(
     db: Session,
     decision: RecoveryDecision,
     execution_reference_id: str,
@@ -342,9 +422,69 @@ def update_recovery_decision_execution(
     """
     Update a decision after successful execution dispatch.
     """
+    if decision.decision_status != DecisionStatus.EXECUTING:
+        raise ValueError(f"Invalid transition from {decision.decision_status} to EXECUTED")
+        
     decision.decision_status = DecisionStatus.EXECUTED
     decision.execution_reference_id = execution_reference_id
     decision.executed_at = datetime.now(timezone.utc)
+    db.add(decision)
+    db.flush()
+
+
+def mark_execution_failed_retryable(
+    db: Session,
+    decision: RecoveryDecision,
+    error_msg: str,
+    error_type: str | None = None,
+    next_retry_at: datetime | None = None,
+) -> None:
+    """
+    Mark an EXECUTING decision as failed but retryable (returns to DECIDED).
+    """
+    if decision.decision_status != DecisionStatus.EXECUTING:
+        raise ValueError(f"Invalid transition from {decision.decision_status} to DECIDED (retry)")
+        
+    decision.decision_status = DecisionStatus.DECIDED
+    decision.last_error = error_msg
+    decision.last_error_type = error_type
+    decision.next_retry_at = next_retry_at
+    db.add(decision)
+    db.flush()
+
+
+def mark_execution_failed_permanent(
+    db: Session,
+    decision: RecoveryDecision,
+    error_msg: str,
+    error_type: str | None = None,
+) -> None:
+    """
+    Mark an EXECUTING decision as permanently failed (transitions to FAILED).
+    """
+    if decision.decision_status != DecisionStatus.EXECUTING:
+        raise ValueError(f"Invalid transition from {decision.decision_status} to FAILED")
+        
+    decision.decision_status = DecisionStatus.FAILED
+    decision.last_error = error_msg
+    decision.last_error_type = error_type
+    decision.next_retry_at = None
+    db.add(decision)
+    db.flush()
+
+
+def update_execution_error_only(
+    db: Session,
+    decision: RecoveryDecision,
+    error_msg: str,
+    error_type: str | None = None,
+) -> None:
+    """
+    Update the error fields without changing the decision status.
+    Useful for recording lookup failures during stale recovery while leaving it in EXECUTING.
+    """
+    decision.last_error = error_msg
+    decision.last_error_type = error_type
     db.add(decision)
     db.flush()
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from contextlib import asynccontextmanager
 
 import joblib
@@ -28,7 +29,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.database import get_db, init_db
+from app.database import get_db, init_db, engine
 from app.executor import MockPaymentLinkProvider
 from app.guardrails import GuardrailsEngine
 from app.ml.policy import EconomicPolicyPredictor
@@ -36,6 +37,7 @@ from app.ml.predictor import PlaceholderPredictor
 from app.models import WebhookEvent
 from app.schemas import EventDetailResponse, HealthResponse
 from app.webhooks import router as webhook_router
+from app.worker import start_worker
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -100,9 +102,31 @@ def create_app() -> FastAPI:
         app.state.predictor = predictor
         app.state.guardrails = GuardrailsEngine(cooldown_hours=settings.cooldown_hours)
         app.state.executor = executor
+        
+        # ── Background Worker ─────────────────────────────────────────────
+        worker_stop_event = None
+        worker_thread = None
+        if settings.worker_enabled:
+            worker_stop_event = threading.Event()
+            worker_thread = threading.Thread(
+                target=start_worker,
+                args=(engine, settings, executor, worker_stop_event),
+                daemon=True,
+                name="RetryWorker"
+            )
+            worker_thread.start()
 
         yield
+        
         logger.info("Shutting down Recovery Opportunity Engine")
+        if worker_stop_event and worker_thread:
+            logger.info("Signalling background worker to stop...")
+            worker_stop_event.set()
+            worker_thread.join(timeout=10)
+            if worker_thread.is_alive():
+                logger.warning("Background worker failed to stop within 10 seconds.")
+            else:
+                logger.info("Background worker stopped cleanly.")
 
     app = FastAPI(
         title="Recovery Opportunity Engine",

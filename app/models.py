@@ -72,7 +72,9 @@ class DecisionStatus(str, enum.Enum):
 
     PENDING_POLICY = "PENDING_POLICY"  # Awaiting ML model / policy engine
     DECIDED = "DECIDED"  # Policy has selected an action
+    EXECUTING = "EXECUTING"  # Action execution in progress
     EXECUTED = "EXECUTED"  # Action has been dispatched to Razorpay
+    FAILED = "FAILED"  # Action execution permanently failed
     OUTCOME_OBSERVED = "OUTCOME_OBSERVED"  # Post-action outcome received
 
 
@@ -292,6 +294,12 @@ class RecoveryDecision(Base):
     expected_incremental_net_paise: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Execution and Closed-Loop Tracking
+    execution_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    execution_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     execution_reference_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     outcome_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
